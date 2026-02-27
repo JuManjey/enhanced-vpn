@@ -143,6 +143,18 @@ function isUdpPortBusy() {
 	return 1
 }
 
+function canReachDnsResolver() {
+	local RESOLVER=$1
+	if ! [[ ${RESOLVER} =~ ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$ ]]; then
+		return 1
+	fi
+	if command -v timeout &>/dev/null; then
+		timeout 2 bash -c "echo > /dev/udp/${RESOLVER}/53" &>/dev/null
+	else
+		bash -c "echo > /dev/udp/${RESOLVER}/53" &>/dev/null
+	fi
+}
+
 function initialCheck() {
 	isRoot
 	checkOS
@@ -156,6 +168,20 @@ function installQuestions() {
 	echo "I need to ask you a few questions before starting the setup."
 	echo "You can keep the default options and just press enter if you are ok with them."
 	echo ""
+
+	until [[ ${RESTRICTIVE_NETWORK_MODE} =~ ^[yn]$ ]]; do
+		read -rp "Enable restrictive-network profile (recommended for Russia)? [Y/n]: " -e -i y RESTRICTIVE_NETWORK_MODE
+		RESTRICTIVE_NETWORK_MODE=$(normalizeYesNo "${RESTRICTIVE_NETWORK_MODE}")
+	done
+
+	DNS_DEFAULT_1="1.1.1.1"
+	DNS_DEFAULT_2="1.0.0.1"
+	if [[ ${RESTRICTIVE_NETWORK_MODE} == "y" ]]; then
+		DNS_DEFAULT_1="9.9.9.9"
+		DNS_DEFAULT_2="8.8.8.8"
+		echo "Restrictive-network profile enabled: IPv4-first mode and resilient DNS defaults."
+		echo ""
+	fi
 
 	# Detect public endpoint (IPv4 preferred, IPv6 fallback) and pre-fill for the user
 	SERVER_PUB_IPV4=$(ip -4 addr | sed -ne 's|^.* inet \([^/]*\)/.* scope global.*$|\1|p' | awk '{print $1}' | head -1)
@@ -190,9 +216,14 @@ function installQuestions() {
 	if ip -6 route show default >/dev/null 2>&1 && ip -6 addr show scope global | grep -q "inet6"; then
 		SERVER_HAS_PUBLIC_IPV6="y"
 	fi
+	ENABLE_IPV6=""
 	until [[ ${ENABLE_IPV6} =~ ^[yn]$ ]]; do
 		if [[ ${SERVER_HAS_PUBLIC_IPV6} == "y" ]]; then
-			read -rp "Enable IPv6 for clients [Y/n]: " -e -i y ENABLE_IPV6
+			if [[ ${RESTRICTIVE_NETWORK_MODE} == "y" ]]; then
+				read -rp "Enable IPv6 for clients [y/N] (IPv4-only is usually more stable in restrictive networks): " -e -i n ENABLE_IPV6
+			else
+				read -rp "Enable IPv6 for clients [Y/n]: " -e -i y ENABLE_IPV6
+			fi
 		else
 			read -rp "No global IPv6 detected. Enable IPv6 anyway? [y/N]: " -e -i n ENABLE_IPV6
 		fi
@@ -221,24 +252,32 @@ function installQuestions() {
 		break
 	done
 
-	# Cloudflare DNS by default
+	# DNS defaults are profile-dependent to reduce failures on restrictive networks
 	until [[ ${CLIENT_DNS_1} =~ ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$ ]]; do
-		read -rp "First DNS resolver to use for the clients: " -e -i 1.1.1.1 CLIENT_DNS_1
+		read -rp "First DNS resolver to use for the clients: " -e -i "${DNS_DEFAULT_1}" CLIENT_DNS_1
 	done
 	until [[ ${CLIENT_DNS_2} =~ ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$ ]]; do
-		read -rp "Second DNS resolver to use for the clients (optional): " -e -i 1.0.0.1 CLIENT_DNS_2
+		read -rp "Second DNS resolver to use for the clients (optional): " -e -i "${DNS_DEFAULT_2}" CLIENT_DNS_2
 		if [[ ${CLIENT_DNS_2} == "" ]]; then
 			CLIENT_DNS_2="${CLIENT_DNS_1}"
 		fi
 	done
 
-	until [[ ${CLIENT_MTU} =~ ^[0-9]+$ ]] && [ "${CLIENT_MTU}" -ge 1280 ] && [ "${CLIENT_MTU}" -le 1500 ]; do
-		read -rp "Client MTU [1280-1500] (1280 recommended for restrictive networks): " -e -i 1280 CLIENT_MTU
+	CLIENT_MTU_MIN=1200
+	if [[ ${ENABLE_IPV6} == "y" ]]; then
+		CLIENT_MTU_MIN=1280
+	fi
+	until [[ ${CLIENT_MTU} =~ ^[0-9]+$ ]] && [ "${CLIENT_MTU}" -ge "${CLIENT_MTU_MIN}" ] && [ "${CLIENT_MTU}" -le 1500 ]; do
+		read -rp "Client MTU [${CLIENT_MTU_MIN}-1500] (1280 recommended for restrictive networks): " -e -i 1280 CLIENT_MTU
 	done
 
 	until [[ ${PERSISTENT_KEEPALIVE} =~ ^[0-9]+$ ]] && [ "${PERSISTENT_KEEPALIVE}" -ge 0 ] && [ "${PERSISTENT_KEEPALIVE}" -le 65535 ]; do
 		read -rp "PersistentKeepalive for clients [0-65535] (25 recommended): " -e -i 25 PERSISTENT_KEEPALIVE
 	done
+	if [[ ${RESTRICTIVE_NETWORK_MODE} == "y" ]] && [[ ${PERSISTENT_KEEPALIVE} -eq 0 ]]; then
+		echo -e "${ORANGE}PersistentKeepalive=0 can break connectivity in restrictive/NAT-heavy networks. Forcing 25.${NC}"
+		PERSISTENT_KEEPALIVE=25
+	fi
 
 	until [[ ${ENABLE_MSS_CLAMP} =~ ^[yn]$ ]]; do
 		read -rp "Enable TCP MSS clamping for unstable routes? [Y/n]: " -e -i y ENABLE_MSS_CLAMP
@@ -262,6 +301,9 @@ function installQuestions() {
 			ALLOWED_IPS="${DEFAULT_ALLOWED_IPS}"
 		fi
 	done
+	if [[ ${RESTRICTIVE_NETWORK_MODE} == "y" ]] && [[ ${ALLOWED_IPS} != *"0.0.0.0/0"* ]]; then
+		echo -e "${ORANGE}WARNING:${NC} Restrictive profile works best when IPv4 default route is tunneled (0.0.0.0/0)."
+	fi
 
 	echo ""
 	echo "Okay, that was all I needed. We are ready to setup your WireGuard server now."
@@ -283,6 +325,21 @@ function runPostInstallChecks() {
 		echo -e "${GREEN}[OK]${NC} UDP port ${SERVER_PORT} is listening."
 	else
 		echo -e "${ORANGE}[WARN]${NC} UDP port ${SERVER_PORT} is not listening yet."
+	fi
+
+	if [[ -n ${CLIENT_DNS_1} ]]; then
+		if canReachDnsResolver "${CLIENT_DNS_1}"; then
+			echo -e "${GREEN}[OK]${NC} DNS resolver ${CLIENT_DNS_1}:53 is reachable from server."
+		else
+			echo -e "${ORANGE}[WARN]${NC} DNS resolver ${CLIENT_DNS_1}:53 is not reachable. Clients may connect but fail to resolve domains."
+		fi
+	fi
+	if [[ -n ${CLIENT_DNS_2} ]] && [[ ${CLIENT_DNS_2} != "${CLIENT_DNS_1}" ]]; then
+		if canReachDnsResolver "${CLIENT_DNS_2}"; then
+			echo -e "${GREEN}[OK]${NC} DNS resolver ${CLIENT_DNS_2}:53 is reachable from server."
+		else
+			echo -e "${ORANGE}[WARN]${NC} DNS resolver ${CLIENT_DNS_2}:53 is not reachable. Clients may connect but fail to resolve domains."
+		fi
 	fi
 
 	IPV4_FORWARD_STATE=$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo "0")
@@ -384,6 +441,7 @@ SERVER_WG_NIC=${SERVER_WG_NIC}
 SERVER_WG_IPV4=${SERVER_WG_IPV4}
 SERVER_WG_IPV6=${SERVER_WG_IPV6}
 ENABLE_IPV6=${ENABLE_IPV6}
+RESTRICTIVE_NETWORK_MODE=${RESTRICTIVE_NETWORK_MODE}
 SERVER_PORT=${SERVER_PORT}
 SERVER_PRIV_KEY=${SERVER_PRIV_KEY}
 SERVER_PUB_KEY=${SERVER_PUB_KEY}
@@ -795,6 +853,10 @@ initialCheck
 if [[ -e /etc/wireguard/params ]]; then
 	source /etc/wireguard/params
 	ENABLE_IPV6=$(normalizeYesNo "${ENABLE_IPV6}")
+	RESTRICTIVE_NETWORK_MODE=$(normalizeYesNo "${RESTRICTIVE_NETWORK_MODE}")
+	if [[ -z ${RESTRICTIVE_NETWORK_MODE} ]]; then
+		RESTRICTIVE_NETWORK_MODE="y"
+	fi
 	if [[ -z ${ENABLE_IPV6} ]]; then
 		if [[ -n ${SERVER_WG_IPV6} ]]; then
 			ENABLE_IPV6="y"
@@ -804,6 +866,9 @@ if [[ -e /etc/wireguard/params ]]; then
 	fi
 	CLIENT_MTU=${CLIENT_MTU:-1280}
 	PERSISTENT_KEEPALIVE=${PERSISTENT_KEEPALIVE:-25}
+	if [[ ${RESTRICTIVE_NETWORK_MODE} == "y" ]] && [[ ${PERSISTENT_KEEPALIVE} == "0" ]]; then
+		PERSISTENT_KEEPALIVE=25
+	fi
 	ENABLE_MSS_CLAMP=$(normalizeYesNo "${ENABLE_MSS_CLAMP}")
 	if [[ -z ${ENABLE_MSS_CLAMP} ]]; then
 		ENABLE_MSS_CLAMP="y"
@@ -821,6 +886,10 @@ if [[ -e /etc/wireguard/params ]]; then
 	fi
 	if [[ -n ${CLIENT_DNS_1} && -z ${CLIENT_DNS_2} ]]; then
 		CLIENT_DNS_2="${CLIENT_DNS_1}"
+	fi
+	if [[ ${RESTRICTIVE_NETWORK_MODE} == "y" ]] && [[ ${CLIENT_DNS_1} == "1.1.1.1" && ${CLIENT_DNS_2} == "1.0.0.1" ]]; then
+		CLIENT_DNS_1="9.9.9.9"
+		CLIENT_DNS_2="8.8.8.8"
 	fi
 	manageMenu
 else
