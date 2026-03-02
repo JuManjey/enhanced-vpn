@@ -191,42 +191,72 @@ function generateAWGParams() {
 function installAmneziaWG() {
 	echo -e "\n${GREEN}Installing AmneziaWG (obfuscated WireGuard)...${NC}"
 
-	if [[ ${OS} == 'ubuntu' ]]; then
-		if ! command -v add-apt-repository &>/dev/null; then
-			apt-get install -y software-properties-common
-		fi
-		add-apt-repository -y ppa:amneziavpn/release
+	# Install build dependencies
+	if [[ ${OS} == 'ubuntu' ]] || [[ ${OS} == 'debian' ]]; then
 		apt-get update
-		installPackages apt-get install -y amneziawg amneziawg-tools iptables qrencode
-	elif [[ ${OS} == 'debian' ]]; then
-		apt-get install -y software-properties-common gnupg curl
-		local UBUNTU_CODENAME="jammy"
-		if [[ ${VERSION_ID} -ge 12 ]]; then
-			UBUNTU_CODENAME="jammy"
-		elif [[ ${VERSION_ID} -ge 11 ]]; then
-			UBUNTU_CODENAME="focal"
-		fi
-		curl -fsSL 'https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x57D6FA862F9262BF' | gpg --dearmor -o /usr/share/keyrings/amnezia-archive-keyring.gpg 2>/dev/null
-		echo "deb [signed-by=/usr/share/keyrings/amnezia-archive-keyring.gpg] https://ppa.launchpadcontent.net/amneziavpn/release/ubuntu ${UBUNTU_CODENAME} main" >/etc/apt/sources.list.d/amnezia.list
-		apt-get update
-		installPackages apt-get install -y amneziawg amneziawg-tools iptables qrencode
+		apt-get install -y git build-essential pkg-config iptables qrencode \
+			linux-headers-"$(uname -r)" || {
+			echo -e "${ORANGE}linux-headers-$(uname -r) not found, trying linux-headers-generic...${NC}"
+			apt-get install -y linux-headers-generic
+		}
+	elif [[ ${OS} == 'fedora' ]]; then
+		dnf install -y git gcc make kernel-devel kernel-headers pkg-config iptables qrencode
+	elif [[ ${OS} == 'centos' ]] || [[ ${OS} == 'almalinux' ]] || [[ ${OS} == 'rocky' ]]; then
+		yum install -y git gcc make kernel-devel kernel-headers pkg-config iptables
+		yum install -y qrencode || true
 	else
-		echo -e "${RED}AmneziaWG packages are currently supported on Ubuntu and Debian.${NC}"
+		echo -e "${RED}AmneziaWG build from source requires Ubuntu, Debian, Fedora, or CentOS.${NC}"
 		echo "Your OS: ${OS}"
-		echo ""
-		echo "You can try building from source:"
-		echo "  https://github.com/amnezia-vpn/amneziawg-linux-kernel-module"
-		echo "  https://github.com/amnezia-vpn/amneziawg-tools"
-		echo ""
-		echo "Or use wstunnel obfuscation method instead."
+		echo "Use wstunnel obfuscation method instead."
 		exit 1
 	fi
+
+	echo -e "${GREEN}Building AmneziaWG kernel module from source...${NC}"
+	rm -rf /tmp/amneziawg-kernel /tmp/amneziawg-tools
+
+	if ! git clone --depth 1 https://github.com/amnezia-vpn/amneziawg-linux-kernel-module.git /tmp/amneziawg-kernel; then
+		echo -e "${RED}Failed to clone amneziawg-linux-kernel-module. Check internet connection.${NC}"
+		exit 1
+	fi
+
+	if ! make -C /tmp/amneziawg-kernel/src -j"$(nproc)"; then
+		echo -e "${RED}Failed to build AmneziaWG kernel module.${NC}"
+		echo "Make sure kernel headers are installed: apt install linux-headers-$(uname -r)"
+		exit 1
+	fi
+	make -C /tmp/amneziawg-kernel/src install
+	depmod -a
+
+	echo -e "${GREEN}Building AmneziaWG tools...${NC}"
+	if ! git clone --depth 1 https://github.com/amnezia-vpn/amneziawg-tools.git /tmp/amneziawg-tools; then
+		echo -e "${RED}Failed to clone amneziawg-tools.${NC}"
+		exit 1
+	fi
+
+	if ! make -C /tmp/amneziawg-tools/src -j"$(nproc)"; then
+		echo -e "${RED}Failed to build amneziawg-tools.${NC}"
+		exit 1
+	fi
+	make -C /tmp/amneziawg-tools/src install
+
+	# Load kernel module
+	modprobe amneziawg || {
+		echo -e "${RED}Failed to load amneziawg kernel module.${NC}"
+		echo "Try rebooting the server and running the script again."
+		exit 1
+	}
+
+	# Ensure module loads on boot
+	echo "amneziawg" >/etc/modules-load.d/amneziawg.conf
+
+	# Cleanup build files
+	rm -rf /tmp/amneziawg-kernel /tmp/amneziawg-tools
 
 	if ! command -v awg &>/dev/null; then
 		echo -e "${RED}AmneziaWG installation failed. 'awg' command not found.${NC}"
 		exit 1
 	fi
-	echo -e "${GREEN}AmneziaWG installed successfully.${NC}"
+	echo -e "${GREEN}AmneziaWG installed successfully: kernel module loaded, awg/awg-quick ready.${NC}"
 }
 
 function installWstunnel() {
