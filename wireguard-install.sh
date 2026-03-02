@@ -1093,9 +1093,24 @@ AllowedIPs = ${SERVER_PEER_ALLOWED_IPS}" >>"${WG_DIR}/${SERVER_WG_NIC}.conf"
 	${WG_CMD} syncconf "${SERVER_WG_NIC}" <(${WG_QUICK} strip "${SERVER_WG_NIC}")
 
 	if command -v qrencode &>/dev/null; then
-		echo -e "${GREEN}\nQR Code:\n${NC}"
-		qrencode -t ansiutf8 -l L <"${HOME_DIR}/${SERVER_WG_NIC}-client-${CLIENT_NAME}.conf"
-		echo ""
+		if [[ ${OBFUSCATION_METHOD} == "amneziawg" ]]; then
+			# Generate QR in AmneziaVPN vpn:// format
+			local CONF_ESCAPED
+			CONF_ESCAPED=$(sed ':a;N;$!ba;s/\n/\\n/g' "${HOME_DIR}/${SERVER_WG_NIC}-client-${CLIENT_NAME}.conf" | sed 's/"/\\"/g')
+
+			local AMNEZIA_JSON
+			AMNEZIA_JSON="{\"containers\":[{\"container\":\"amnezia-awg\",\"awg\":{\"last_config\":\"${CONF_ESCAPED}\",\"port\":\"${SERVER_PORT}\",\"transport_proto\":\"udp\",\"Jc\":\"${AWG_JC}\",\"Jmin\":\"${AWG_JMIN}\",\"Jmax\":\"${AWG_JMAX}\",\"S1\":\"${AWG_S1}\",\"S2\":\"${AWG_S2}\",\"H1\":\"${AWG_H1}\",\"H2\":\"${AWG_H2}\",\"H3\":\"${AWG_H3}\",\"H4\":\"${AWG_H4}\"}}],\"defaultContainer\":\"amnezia-awg\",\"description\":\"${CLIENT_NAME}\",\"dns1\":\"${CLIENT_DNS_1}\",\"dns2\":\"${CLIENT_DNS_2}\",\"hostName\":\"${SERVER_PUB_IP}\"}"
+
+			local VPN_URI="vpn://$(echo -n "${AMNEZIA_JSON}" | base64 -w 0)"
+
+			echo -e "${GREEN}\nQR Code for AmneziaVPN (scan with AmneziaVPN app):\n${NC}"
+			echo -n "${VPN_URI}" | qrencode -t ansiutf8 -l L
+			echo ""
+		else
+			echo -e "${GREEN}\nQR Code:\n${NC}"
+			qrencode -t ansiutf8 -l L <"${HOME_DIR}/${SERVER_WG_NIC}-client-${CLIENT_NAME}.conf"
+			echo ""
+		fi
 	fi
 
 	echo -e "${GREEN}Config: ${HOME_DIR}/${SERVER_WG_NIC}-client-${CLIENT_NAME}.conf${NC}"
@@ -1103,7 +1118,7 @@ AllowedIPs = ${SERVER_PEER_ALLOWED_IPS}" >>"${WG_DIR}/${SERVER_WG_NIC}.conf"
 	if [[ ${OBFUSCATION_METHOD} == "amneziawg" ]]; then
 		echo ""
 		echo -e "${GREEN}=== How to connect ===${NC}"
-		echo -e "${BLUE}Android/iOS:${NC} Install AmneziaVPN → import .conf file → connect"
+		echo -e "${BLUE}Android/iOS:${NC} Install AmneziaVPN → scan QR code above OR import .conf file"
 		echo -e "${BLUE}Windows:${NC}    Install AmneziaVPN → import .conf file → connect"
 		echo -e "${BLUE}macOS:${NC}      Install AmneziaVPN → import .conf file → connect"
 		echo -e "${BLUE}Linux:${NC}      Install amneziawg-tools → awg-quick up <conf>"
