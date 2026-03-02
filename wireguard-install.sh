@@ -603,7 +603,11 @@ function installQuestions() {
 		OBFUSCATION_PORT=""
 		local DEFAULT_PORT=443
 		if [[ ${OBFUSCATION_METHOD} == "amneziawg" ]]; then
-			DEFAULT_PORT=443
+			DEFAULT_PORT=$(shuf -i 20000-50000 -n 1)
+			while isUdpPortBusy "${DEFAULT_PORT}"; do
+				DEFAULT_PORT=$(shuf -i 20000-50000 -n 1)
+			done
+			echo -e "${BLUE}Random port recommended for AmneziaWG — harder for DPI to profile.${NC}"
 		fi
 		while true; do
 			read -rp "Server port [1-65535]: " -e -i "${DEFAULT_PORT}" SERVER_PORT
@@ -625,12 +629,12 @@ function installQuestions() {
 		if [[ ${CLIENT_DNS_2} == "" ]]; then CLIENT_DNS_2="${CLIENT_DNS_1}"; fi
 	done
 
-	CLIENT_MTU_MIN=1200
-	if [[ ${ENABLE_IPV6} == "y" ]]; then CLIENT_MTU_MIN=1280; fi
+	CLIENT_MTU_MIN=960
 	local DEFAULT_MTU=1280
-	if [[ ${OBFUSCATION_METHOD} == "wstunnel" ]]; then DEFAULT_MTU=1200; fi
+	if [[ ${OBFUSCATION_METHOD} == "amneziawg" ]]; then DEFAULT_MTU=1100; fi
+	if [[ ${OBFUSCATION_METHOD} == "wstunnel" ]]; then DEFAULT_MTU=1100; fi
 	until [[ ${CLIENT_MTU} =~ ^[0-9]+$ ]] && [ "${CLIENT_MTU}" -ge "${CLIENT_MTU_MIN}" ] && [ "${CLIENT_MTU}" -le 1500 ]; do
-		read -rp "Client MTU [${CLIENT_MTU_MIN}-1500]: " -e -i "${DEFAULT_MTU}" CLIENT_MTU
+		read -rp "Client MTU [${CLIENT_MTU_MIN}-1500] (${DEFAULT_MTU} recommended for obfuscation): " -e -i "${DEFAULT_MTU}" CLIENT_MTU
 	done
 
 	until [[ ${PERSISTENT_KEEPALIVE} =~ ^[0-9]+$ ]] && [ "${PERSISTENT_KEEPALIVE}" -ge 0 ] && [ "${PERSISTENT_KEEPALIVE}" -le 65535 ]; do
@@ -1093,24 +1097,9 @@ AllowedIPs = ${SERVER_PEER_ALLOWED_IPS}" >>"${WG_DIR}/${SERVER_WG_NIC}.conf"
 	${WG_CMD} syncconf "${SERVER_WG_NIC}" <(${WG_QUICK} strip "${SERVER_WG_NIC}")
 
 	if command -v qrencode &>/dev/null; then
-		if [[ ${OBFUSCATION_METHOD} == "amneziawg" ]]; then
-			# Generate QR in AmneziaVPN vpn:// format
-			local CONF_ESCAPED
-			CONF_ESCAPED=$(sed ':a;N;$!ba;s/\n/\\n/g' "${HOME_DIR}/${SERVER_WG_NIC}-client-${CLIENT_NAME}.conf" | sed 's/"/\\"/g')
-
-			local AMNEZIA_JSON
-			AMNEZIA_JSON="{\"containers\":[{\"container\":\"amnezia-awg\",\"awg\":{\"last_config\":\"${CONF_ESCAPED}\",\"port\":\"${SERVER_PORT}\",\"transport_proto\":\"udp\",\"Jc\":\"${AWG_JC}\",\"Jmin\":\"${AWG_JMIN}\",\"Jmax\":\"${AWG_JMAX}\",\"S1\":\"${AWG_S1}\",\"S2\":\"${AWG_S2}\",\"H1\":\"${AWG_H1}\",\"H2\":\"${AWG_H2}\",\"H3\":\"${AWG_H3}\",\"H4\":\"${AWG_H4}\"}}],\"defaultContainer\":\"amnezia-awg\",\"description\":\"${CLIENT_NAME}\",\"dns1\":\"${CLIENT_DNS_1}\",\"dns2\":\"${CLIENT_DNS_2}\",\"hostName\":\"${SERVER_PUB_IP}\"}"
-
-			local VPN_URI="vpn://$(echo -n "${AMNEZIA_JSON}" | base64 -w 0)"
-
-			echo -e "${GREEN}\nQR Code for AmneziaVPN (scan with AmneziaVPN app):\n${NC}"
-			echo -n "${VPN_URI}" | qrencode -t ansiutf8 -l L
-			echo ""
-		else
-			echo -e "${GREEN}\nQR Code:\n${NC}"
-			qrencode -t ansiutf8 -l L <"${HOME_DIR}/${SERVER_WG_NIC}-client-${CLIENT_NAME}.conf"
-			echo ""
-		fi
+		echo -e "${GREEN}\nQR Code (config):\n${NC}"
+		qrencode -t ansiutf8 -l L <"${HOME_DIR}/${SERVER_WG_NIC}-client-${CLIENT_NAME}.conf"
+		echo ""
 	fi
 
 	echo -e "${GREEN}Config: ${HOME_DIR}/${SERVER_WG_NIC}-client-${CLIENT_NAME}.conf${NC}"
@@ -1118,12 +1107,22 @@ AllowedIPs = ${SERVER_PEER_ALLOWED_IPS}" >>"${WG_DIR}/${SERVER_WG_NIC}.conf"
 	if [[ ${OBFUSCATION_METHOD} == "amneziawg" ]]; then
 		echo ""
 		echo -e "${GREEN}=== How to connect ===${NC}"
-		echo -e "${BLUE}Android/iOS:${NC} Install AmneziaVPN → scan QR code above OR import .conf file"
-		echo -e "${BLUE}Windows:${NC}    Install AmneziaVPN → import .conf file → connect"
-		echo -e "${BLUE}macOS:${NC}      Install AmneziaVPN → import .conf file → connect"
-		echo -e "${BLUE}Linux:${NC}      Install amneziawg-tools → awg-quick up <conf>"
+		echo -e "${BLUE}Android/iOS:${NC}"
+		echo "  1. Install AmneziaVPN (Google Play / App Store / amnezia.org)"
+		echo "  2. Open app → '+' → 'I have the data to connect'"
+		echo "  3. Choose 'Open config file, key or QR-code'"
+		echo "  4. Select .conf file or paste config text"
 		echo ""
-		echo -e "AmneziaVPN: ${GREEN}https://amnezia.org${NC}"
+		echo -e "${BLUE}Windows/macOS:${NC}"
+		echo "  1. Install AmneziaVPN from https://amnezia.org"
+		echo "  2. Import .conf file"
+		echo ""
+		echo -e "${BLUE}Linux:${NC}"
+		echo "  awg-quick up ${HOME_DIR}/${SERVER_WG_NIC}-client-${CLIENT_NAME}.conf"
+		echo ""
+		echo -e "Download AmneziaVPN: ${GREEN}https://amnezia.org${NC}"
+		echo ""
+		echo -e "${ORANGE}Transfer .conf to phone via: Telegram (send to yourself), Email, AirDrop, USB${NC}"
 	elif [[ ${OBFUSCATION_METHOD} == "wstunnel" ]]; then
 		generateClientHelper "${CLIENT_NAME}" "${HOME_DIR}"
 	fi
@@ -1269,7 +1268,7 @@ if [[ -e /etc/wireguard/params ]]; then
 		if [[ -n ${SERVER_WG_IPV6} ]]; then ENABLE_IPV6="y"; else ENABLE_IPV6="n"; fi
 	fi
 	OBFUSCATION_PORT=${OBFUSCATION_PORT:-443}
-	CLIENT_MTU=${CLIENT_MTU:-1280}
+	CLIENT_MTU=${CLIENT_MTU:-1100}
 	PERSISTENT_KEEPALIVE=${PERSISTENT_KEEPALIVE:-25}
 	if [[ ${RESTRICTIVE_NETWORK_MODE} == "y" ]] && [[ ${PERSISTENT_KEEPALIVE} == "0" ]]; then
 		PERSISTENT_KEEPALIVE=25
