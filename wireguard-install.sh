@@ -473,6 +473,139 @@ BATEOF
 	echo -e "${BLUE}Windows:${NC} Run connect.bat as Admin, then activate WireGuard"
 }
 
+function setupCamouflage() {
+	echo -e "\n${GREEN}Setting up stealth camouflage...${NC}"
+
+	# Install nginx
+	if [[ ${OS} == 'ubuntu' ]] || [[ ${OS} == 'debian' ]]; then
+		apt-get install -y nginx openssl >/dev/null 2>&1
+	elif [[ ${OS} == 'fedora' ]]; then
+		dnf install -y nginx openssl >/dev/null 2>&1
+	elif [[ ${OS} == 'centos' ]] || [[ ${OS} == 'almalinux' ]] || [[ ${OS} == 'rocky' ]] || [[ ${OS} == 'oracle' ]]; then
+		yum install -y nginx openssl >/dev/null 2>&1
+	elif [[ ${OS} == 'arch' ]]; then
+		pacman -S --needed --noconfirm nginx openssl >/dev/null 2>&1
+	elif [[ ${OS} == 'alpine' ]]; then
+		apk add nginx openssl >/dev/null 2>&1
+	fi
+
+	if ! command -v nginx &>/dev/null; then
+		echo -e "${ORANGE}[WARN] Failed to install nginx. Camouflage skipped.${NC}"
+		ENABLE_STEALTH="n"
+		return
+	fi
+
+	# Generate self-signed TLS certificate
+	mkdir -p /etc/nginx/ssl
+	local CERT_CN
+	CERT_CN=$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo "localhost")
+	local TLS_SAN="DNS:${CERT_CN}"
+	if [[ ${SERVER_PUB_IP} =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+		TLS_SAN="IP:${SERVER_PUB_IP},DNS:${CERT_CN}"
+	fi
+	openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+		-keyout /etc/nginx/ssl/selfsigned.key -out /etc/nginx/ssl/selfsigned.crt \
+		-days 3650 -nodes -subj "/CN=${CERT_CN}" \
+		-addext "subjectAltName=${TLS_SAN}" 2>/dev/null
+	chmod 600 /etc/nginx/ssl/selfsigned.key
+
+	# Create decoy website
+	mkdir -p /var/www/decoy
+	local SITE_TITLE
+	local RAND_TITLE=$((RANDOM % 5))
+	case ${RAND_TITLE} in
+	0) SITE_TITLE="CloudSync Platform" ;;
+	1) SITE_TITLE="DataFlow Analytics" ;;
+	2) SITE_TITLE="NetBridge Services" ;;
+	3) SITE_TITLE="Apex Hosting" ;;
+	4) SITE_TITLE="TechVault Solutions" ;;
+	esac
+
+	cat >/var/www/decoy/index.html <<HTMLEOF
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${SITE_TITLE}</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:#333;line-height:1.6}
+.hero{background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:#fff;padding:80px 20px;text-align:center}
+.hero h1{font-size:2.5rem;margin-bottom:16px}
+.hero p{font-size:1.2rem;opacity:.9;max-width:600px;margin:0 auto}
+.features{display:flex;flex-wrap:wrap;justify-content:center;gap:32px;padding:60px 20px;max-width:960px;margin:0 auto}
+.feature{flex:1;min-width:250px;max-width:300px;padding:24px;border-radius:8px;box-shadow:0 2px 12px rgba(0,0,0,.08)}
+.feature h3{margin-bottom:8px;color:#667eea}
+footer{text-align:center;padding:32px;color:#888;font-size:.9rem;border-top:1px solid #eee}
+</style>
+</head>
+<body>
+<div class="hero">
+<h1>${SITE_TITLE}</h1>
+<p>Enterprise-grade infrastructure for modern applications. Reliable, secure, scalable.</p>
+</div>
+<div class="features">
+<div class="feature"><h3>High Availability</h3><p>99.99% uptime SLA with automatic failover across multiple regions.</p></div>
+<div class="feature"><h3>Security First</h3><p>End-to-end encryption, DDoS protection, and compliance certifications.</p></div>
+<div class="feature"><h3>Global Network</h3><p>Low-latency connections through our worldwide edge network.</p></div>
+</div>
+<footer>&copy; 2024 ${SITE_TITLE}. All rights reserved.</footer>
+</body>
+</html>
+HTMLEOF
+
+	# Configure nginx — detect config style
+	local NGINX_CONF_DIR="/etc/nginx/conf.d"
+	local NGINX_CONF_FILE="${NGINX_CONF_DIR}/decoy.conf"
+	if [[ -d /etc/nginx/sites-available ]]; then
+		NGINX_CONF_FILE="/etc/nginx/sites-available/decoy"
+	fi
+
+	# Remove default configs that may conflict
+	rm -f /etc/nginx/sites-enabled/default 2>/dev/null
+	rm -f /etc/nginx/conf.d/default.conf 2>/dev/null
+
+	cat >"${NGINX_CONF_FILE}" <<NGINXEOF
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+    return 301 https://\$host\$request_uri;
+}
+server {
+    listen 443 ssl default_server;
+    listen [::]:443 ssl default_server;
+    server_name _;
+    ssl_certificate /etc/nginx/ssl/selfsigned.crt;
+    ssl_certificate_key /etc/nginx/ssl/selfsigned.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+    root /var/www/decoy;
+    index index.html;
+    location / {
+        try_files \$uri \$uri/ =404;
+    }
+}
+NGINXEOF
+
+	if [[ -d /etc/nginx/sites-available ]]; then
+		ln -sf "${NGINX_CONF_FILE}" /etc/nginx/sites-enabled/decoy
+	fi
+
+	# Test and start nginx
+	if nginx -t 2>/dev/null; then
+		systemctl enable nginx 2>/dev/null
+		systemctl restart nginx 2>/dev/null
+		echo -e "${GREEN}Camouflage web server active on port 80/443 TCP${NC}"
+		echo -e "${GREEN}Site: ${SITE_TITLE}${NC}"
+	else
+		echo -e "${ORANGE}[WARN] nginx config test failed. Fixing...${NC}"
+		systemctl restart nginx 2>/dev/null || true
+	fi
+}
+
 function installQuestions() {
 	echo "Welcome to the Enhanced WireGuard installer!"
 	echo ""
@@ -488,9 +621,10 @@ function installQuestions() {
 	DNS_DEFAULT_1="1.1.1.1"
 	DNS_DEFAULT_2="1.0.0.1"
 	if [[ ${RESTRICTIVE_NETWORK_MODE} == "y" ]]; then
-		DNS_DEFAULT_1="9.9.9.9"
-		DNS_DEFAULT_2="8.8.8.8"
+		DNS_DEFAULT_1="8.8.8.8"
+		DNS_DEFAULT_2="1.1.1.1"
 		echo "Restrictive-network profile enabled."
+		echo -e "${BLUE}DNS: 8.8.8.8 + 1.1.1.1 (most reliable from Russia).${NC}"
 		echo ""
 	fi
 
@@ -519,8 +653,16 @@ function installQuestions() {
 	esac
 	setWgVars
 
-	# Detect public endpoint
-	SERVER_PUB_IPV4=$(ip -4 addr | sed -ne 's|^.* inet \([^/]*\)/.* scope global.*$|\1|p' | awk '{print $1}' | head -1)
+	# Detect public endpoint — try external services first (handles NAT/cloud correctly)
+	SERVER_PUB_IPV4=""
+	if command -v curl &>/dev/null; then
+		SERVER_PUB_IPV4=$(curl -4 -sS --connect-timeout 4 https://ifconfig.co 2>/dev/null) ||
+			SERVER_PUB_IPV4=$(curl -4 -sS --connect-timeout 4 https://api.ipify.org 2>/dev/null) ||
+			SERVER_PUB_IPV4=$(curl -4 -sS --connect-timeout 4 https://icanhazip.com 2>/dev/null) || true
+	fi
+	if [[ -z ${SERVER_PUB_IPV4} ]] || ! [[ ${SERVER_PUB_IPV4} =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+		SERVER_PUB_IPV4=$(ip -4 addr | sed -ne 's|^.* inet \([^/]*\)/.* scope global.*$|\1|p' | awk '{print $1}' | head -1)
+	fi
 	SERVER_PUB_IPV6=$(ip -6 addr | sed -ne 's|^.* inet6 \([^/]*\)/.* scope global.*$|\1|p' | head -1)
 	SERVER_PUB_IP=${SERVER_PUB_IPV4}
 	if [[ -z ${SERVER_PUB_IP} ]]; then
@@ -663,8 +805,36 @@ function installQuestions() {
 		if [[ ${ALLOWED_IPS} == "" ]]; then ALLOWED_IPS="${DEFAULT_ALLOWED_IPS}"; fi
 	done
 
+	# Stealth camouflage — decoy web server + anti-probe firewall
+	ENABLE_STEALTH=""
+	if [[ ${RESTRICTIVE_NETWORK_MODE} == "y" ]] && [[ ${OBFUSCATION_METHOD} != "wstunnel" ]]; then
+		echo ""
+		echo -e "${GREEN}=== Stealth Camouflage ===${NC}"
+		echo ""
+		echo "  Installs a real web server (nginx) on port 443/TCP as a decoy."
+		echo "  When DPI or scanners probe this server, they see a normal HTTPS website."
+		echo "  VPN traffic goes through a separate UDP port and is invisible."
+		echo ""
+		echo "  Also adds firewall rules that block ping scans and invalid probes."
+		echo ""
+		local STEALTH_DEFAULT="y"
+		if isTcpPortBusy 443 || isTcpPortBusy 80; then
+			echo -e "${ORANGE}  Port 80 or 443/TCP is already in use. Camouflage web server may conflict.${NC}"
+			STEALTH_DEFAULT="n"
+		fi
+		until [[ ${ENABLE_STEALTH} =~ ^[yn]$ ]]; do
+			read -rp "Enable stealth camouflage? [Y/n]: " -e -i "${STEALTH_DEFAULT}" ENABLE_STEALTH
+			ENABLE_STEALTH=$(normalizeYesNo "${ENABLE_STEALTH}")
+		done
+	else
+		ENABLE_STEALTH="n"
+	fi
+
 	echo ""
 	echo "Ready to install. Method: ${OBFUSCATION_METHOD}"
+	if [[ ${ENABLE_STEALTH} == "y" ]]; then
+		echo "Stealth camouflage: enabled (nginx decoy + anti-probe firewall)"
+	fi
 	read -n1 -r -p "Press any key to continue..."
 }
 
@@ -825,6 +995,7 @@ AWG_H1=${AWG_H1}
 AWG_H2=${AWG_H2}
 AWG_H3=${AWG_H3}
 AWG_H4=${AWG_H4}
+ENABLE_STEALTH=${ENABLE_STEALTH}
 PARAMSEOF
 	chmod 600 /etc/wireguard/params
 
@@ -914,6 +1085,21 @@ PostDown = ip6tables -t mangle -D FORWARD -o ${SERVER_WG_NIC} -p tcp --tcp-flags
 		fi
 	fi
 
+	# Stealth firewall rules — hide server from probes and scans
+	if [[ ${ENABLE_STEALTH} == "y" ]]; then
+		echo "PostUp = iptables -I INPUT -p icmp --icmp-type echo-request -j DROP
+PostUp = iptables -I INPUT -m conntrack --ctstate INVALID -j DROP
+PostDown = iptables -D INPUT -p icmp --icmp-type echo-request -j DROP
+PostDown = iptables -D INPUT -m conntrack --ctstate INVALID -j DROP" >>"${WG_DIR}/${SERVER_WG_NIC}.conf"
+		if [[ ${ENABLE_IPV6} == "y" ]]; then
+			echo "PostUp = ip6tables -I INPUT -p icmpv6 --icmpv6-type echo-request -j DROP
+PostUp = ip6tables -I INPUT -m conntrack --ctstate INVALID -j DROP
+PostDown = ip6tables -D INPUT -p icmpv6 --icmpv6-type echo-request -j DROP
+PostDown = ip6tables -D INPUT -m conntrack --ctstate INVALID -j DROP" >>"${WG_DIR}/${SERVER_WG_NIC}.conf"
+		fi
+		echo -e "${GREEN}Stealth iptables rules added (ICMP block, invalid drop).${NC}"
+	fi
+
 	# Sysctl
 	echo "net.ipv4.ip_forward = 1
 net.ipv4.conf.all.src_valid_mark = 1
@@ -941,6 +1127,11 @@ net.ipv4.conf.default.rp_filter = 2" >/etc/sysctl.d/wg.conf
 	# Setup wstunnel after WireGuard is running
 	if [[ ${OBFUSCATION_METHOD} == "wstunnel" ]]; then
 		setupObfuscation
+	fi
+
+	# Setup camouflage web server
+	if [[ ${ENABLE_STEALTH} == "y" ]]; then
+		setupCamouflage
 	fi
 
 	newClient
@@ -1096,13 +1287,37 @@ AllowedIPs = ${SERVER_PEER_ALLOWED_IPS}" >>"${WG_DIR}/${SERVER_WG_NIC}.conf"
 
 	${WG_CMD} syncconf "${SERVER_WG_NIC}" <(${WG_QUICK} strip "${SERVER_WG_NIC}")
 
+	local CONFIG_FILE="${HOME_DIR}/${SERVER_WG_NIC}-client-${CLIENT_NAME}.conf"
+
 	if command -v qrencode &>/dev/null; then
-		echo -e "${GREEN}\nQR Code (config):\n${NC}"
-		qrencode -t ansiutf8 -l L <"${HOME_DIR}/${SERVER_WG_NIC}-client-${CLIENT_NAME}.conf"
+		# PNG file — reliable for sharing via messenger / email
+		local QR_PNG="${HOME_DIR}/${SERVER_WG_NIC}-client-${CLIENT_NAME}-qr.png"
+		if qrencode -t PNG -o "${QR_PNG}" -l M -s 10 <"${CONFIG_FILE}" 2>/dev/null; then
+			chmod 600 "${QR_PNG}"
+			echo -e "\n${GREEN}QR code (PNG): ${QR_PNG}${NC}"
+			echo -e "${BLUE}Send the PNG file to client for scanning in AmneziaVPN.${NC}"
+		fi
+
+		echo -e "${GREEN}\nQR Code (terminal):\n${NC}"
+		qrencode -t ansiutf8 -l M <"${CONFIG_FILE}"
 		echo ""
+
+		if [[ ${OBFUSCATION_METHOD} == "amneziawg" ]]; then
+			echo -e "${ORANGE}Note: Some AmneziaVPN versions may not import AmneziaWG configs via QR correctly.${NC}"
+			echo -e "${ORANGE}If QR scan fails, use file import or copy-paste the config text below.${NC}"
+			echo ""
+		fi
 	fi
 
-	echo -e "${GREEN}Config: ${HOME_DIR}/${SERVER_WG_NIC}-client-${CLIENT_NAME}.conf${NC}"
+	echo -e "${GREEN}Config file: ${CONFIG_FILE}${NC}"
+
+	# Printable config text for copy-paste delivery (Telegram, etc.)
+	echo ""
+	echo -e "${GREEN}=== Config text (copy-paste into AmneziaVPN) ===${NC}"
+	echo "----------- START -----------"
+	while IFS= read -r line; do echo "${line}"; done <"${CONFIG_FILE}"
+	echo "------------ END ------------"
+	echo ""
 
 	if [[ ${OBFUSCATION_METHOD} == "amneziawg" ]]; then
 		echo ""
@@ -1184,6 +1399,17 @@ function uninstallWg() {
 		rm -f /usr/local/bin/wstunnel
 		rm -rf /etc/wstunnel
 
+		# Remove camouflage web server
+		if [[ ${ENABLE_STEALTH} == "y" ]] || [[ -f /etc/nginx/ssl/selfsigned.key ]]; then
+			systemctl stop nginx 2>/dev/null || true
+			systemctl disable nginx 2>/dev/null || true
+			rm -f /etc/nginx/sites-available/decoy /etc/nginx/sites-enabled/decoy 2>/dev/null
+			rm -f /etc/nginx/conf.d/decoy.conf 2>/dev/null
+			rm -rf /etc/nginx/ssl 2>/dev/null
+			rm -rf /var/www/decoy 2>/dev/null
+			echo "Camouflage web server removed."
+		fi
+
 		if [[ ${OS} == 'ubuntu' ]] || [[ ${OS} == 'debian' ]]; then
 			apt-get remove -y wireguard wireguard-tools amneziawg amneziawg-tools qrencode 2>/dev/null || true
 		elif [[ ${OS} == 'fedora' ]]; then
@@ -1210,6 +1436,214 @@ function uninstallWg() {
 	fi
 }
 
+function runDiagnostics() {
+	echo ""
+	echo -e "${GREEN}========================================${NC}"
+	echo -e "${GREEN}  VPN Server Diagnostics${NC}"
+	echo -e "${GREEN}========================================${NC}"
+	echo ""
+
+	local ISSUES=0
+
+	# 1. WireGuard/AmneziaWG interface
+	echo -e "${BLUE}[1/9] WireGuard interface${NC}"
+	if ip link show "${SERVER_WG_NIC}" &>/dev/null; then
+		echo -e "  ${GREEN}[OK]${NC} Interface ${SERVER_WG_NIC} is UP"
+		${WG_CMD} show "${SERVER_WG_NIC}" 2>/dev/null | head -8 | sed 's/^/  /'
+	else
+		echo -e "  ${RED}[FAIL]${NC} Interface ${SERVER_WG_NIC} is DOWN"
+		echo -e "  ${ORANGE}Fix: systemctl restart ${WG_SVC}@${SERVER_WG_NIC}${NC}"
+		ISSUES=$((ISSUES + 1))
+	fi
+	echo ""
+
+	# 2. Listening port
+	echo -e "${BLUE}[2/9] Listening port${NC}"
+	if command -v ss &>/dev/null && ss -Hlun "sport = :${SERVER_PORT}" | grep -q .; then
+		echo -e "  ${GREEN}[OK]${NC} UDP port ${SERVER_PORT} is listening"
+	else
+		echo -e "  ${RED}[FAIL]${NC} UDP port ${SERVER_PORT} is NOT listening"
+		ISSUES=$((ISSUES + 1))
+	fi
+	echo ""
+
+	# 3. IP forwarding
+	echo -e "${BLUE}[3/9] IP forwarding${NC}"
+	local FWD_V4
+	FWD_V4=$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo "0")
+	if [[ ${FWD_V4} == "1" ]]; then
+		echo -e "  ${GREEN}[OK]${NC} net.ipv4.ip_forward = 1"
+	else
+		echo -e "  ${RED}[FAIL]${NC} net.ipv4.ip_forward = ${FWD_V4} (must be 1)"
+		echo -e "  ${ORANGE}Fix: sysctl -w net.ipv4.ip_forward=1${NC}"
+		ISSUES=$((ISSUES + 1))
+	fi
+	if [[ ${ENABLE_IPV6} == "y" ]]; then
+		local FWD_V6
+		FWD_V6=$(sysctl -n net.ipv6.conf.all.forwarding 2>/dev/null || echo "0")
+		if [[ ${FWD_V6} == "1" ]]; then
+			echo -e "  ${GREEN}[OK]${NC} net.ipv6.conf.all.forwarding = 1"
+		else
+			echo -e "  ${RED}[FAIL]${NC} IPv6 forwarding disabled"
+			ISSUES=$((ISSUES + 1))
+		fi
+	fi
+	echo ""
+
+	# 4. NAT / masquerade rules
+	echo -e "${BLUE}[4/9] NAT / masquerade${NC}"
+	if iptables -t nat -L POSTROUTING -n 2>/dev/null | grep -q "MASQUERADE.*${SERVER_WG_IPV4%.*}"; then
+		echo -e "  ${GREEN}[OK]${NC} IPv4 MASQUERADE rule present"
+	else
+		echo -e "  ${RED}[FAIL]${NC} IPv4 MASQUERADE rule MISSING"
+		echo -e "  ${ORANGE}Fix: Restart service: systemctl restart ${WG_SVC}@${SERVER_WG_NIC}${NC}"
+		ISSUES=$((ISSUES + 1))
+	fi
+	if iptables -L FORWARD -n 2>/dev/null | grep -q "${SERVER_WG_NIC}"; then
+		echo -e "  ${GREEN}[OK]${NC} FORWARD rules present for ${SERVER_WG_NIC}"
+	else
+		echo -e "  ${RED}[FAIL]${NC} FORWARD rules MISSING"
+		ISSUES=$((ISSUES + 1))
+	fi
+	echo ""
+
+	# 5. DNS resolution from server
+	echo -e "${BLUE}[5/9] DNS resolution${NC}"
+	for DNS_SRV in ${CLIENT_DNS_1} ${CLIENT_DNS_2}; do
+		if [[ -n ${DNS_SRV} ]]; then
+			if canReachDnsResolver "${DNS_SRV}"; then
+				echo -e "  ${GREEN}[OK]${NC} DNS ${DNS_SRV} reachable from server"
+			else
+				echo -e "  ${ORANGE}[WARN]${NC} DNS ${DNS_SRV} NOT reachable from server"
+				ISSUES=$((ISSUES + 1))
+			fi
+		fi
+	done
+	echo ""
+
+	# 6. External connectivity from server
+	echo -e "${BLUE}[6/9] External connectivity${NC}"
+	if command -v curl &>/dev/null; then
+		local EXT_IP
+		EXT_IP=$(curl -4 -sS --connect-timeout 5 https://ifconfig.co 2>/dev/null)
+		if [[ -n ${EXT_IP} ]]; then
+			echo -e "  ${GREEN}[OK]${NC} Server can reach internet (external IP: ${EXT_IP})"
+			if [[ ${EXT_IP} != "${SERVER_PUB_IP}" ]]; then
+				echo -e "  ${ORANGE}[WARN]${NC} External IP (${EXT_IP}) differs from configured endpoint (${SERVER_PUB_IP})"
+				echo -e "  ${ORANGE}       Client configs may have wrong Endpoint. Verify SERVER_PUB_IP.${NC}"
+				ISSUES=$((ISSUES + 1))
+			fi
+		else
+			echo -e "  ${RED}[FAIL]${NC} Server cannot reach external services"
+			ISSUES=$((ISSUES + 1))
+		fi
+	else
+		echo -e "  ${ORANGE}[SKIP]${NC} curl not installed, cannot test"
+	fi
+	echo ""
+
+	# 7. Obfuscation status
+	echo -e "${BLUE}[7/9] Obfuscation${NC}"
+	case "${OBFUSCATION_METHOD}" in
+	amneziawg)
+		if lsmod 2>/dev/null | grep -q amneziawg; then
+			echo -e "  ${GREEN}[OK]${NC} AmneziaWG kernel module loaded"
+		else
+			echo -e "  ${RED}[FAIL]${NC} AmneziaWG kernel module NOT loaded"
+			echo -e "  ${ORANGE}Fix: modprobe amneziawg${NC}"
+			ISSUES=$((ISSUES + 1))
+		fi
+		echo -e "  ${GREEN}AWG params:${NC} Jc=${AWG_JC} Jmin=${AWG_JMIN} Jmax=${AWG_JMAX} S1=${AWG_S1} S2=${AWG_S2}"
+		;;
+	wstunnel)
+		if systemctl is-active --quiet wstunnel-server 2>/dev/null; then
+			echo -e "  ${GREEN}[OK]${NC} wstunnel service is running"
+		else
+			echo -e "  ${RED}[FAIL]${NC} wstunnel service is NOT running"
+			ISSUES=$((ISSUES + 1))
+		fi
+		;;
+	*)
+		echo -e "  ${ORANGE}[WARN]${NC} No obfuscation — will be BLOCKED by Russian DPI"
+		ISSUES=$((ISSUES + 1))
+		;;
+	esac
+	echo ""
+
+	# 7b. Stealth camouflage
+	if [[ ${ENABLE_STEALTH} == "y" ]]; then
+		echo -e "${BLUE}[7b] Stealth camouflage${NC}"
+		if systemctl is-active --quiet nginx 2>/dev/null; then
+			echo -e "  ${GREEN}[OK]${NC} Camouflage web server (nginx) is running"
+		else
+			echo -e "  ${RED}[FAIL]${NC} Camouflage web server (nginx) is NOT running"
+			echo -e "  ${ORANGE}Fix: systemctl start nginx${NC}"
+			ISSUES=$((ISSUES + 1))
+		fi
+		if iptables -L INPUT -n 2>/dev/null | grep -q "icmp.*echo-request.*DROP"; then
+			echo -e "  ${GREEN}[OK]${NC} ICMP echo-request blocked (hidden from ping)"
+		else
+			echo -e "  ${ORANGE}[WARN]${NC} ICMP not blocked (server responds to ping)"
+		fi
+		echo ""
+	fi
+
+	# 8. Connected peers
+	echo -e "${BLUE}[8/9] Connected peers${NC}"
+	local PEER_COUNT
+	PEER_COUNT=$(${WG_CMD} show "${SERVER_WG_NIC}" peers 2>/dev/null | wc -l)
+	echo -e "  Configured peers: ${PEER_COUNT}"
+	local HANDSHAKES
+	HANDSHAKES=$(${WG_CMD} show "${SERVER_WG_NIC}" latest-handshakes 2>/dev/null)
+	if [[ -n ${HANDSHAKES} ]]; then
+		while IFS=$'\t' read -r PEER_KEY LAST_HS; do
+			if [[ ${LAST_HS} -gt 0 ]]; then
+				local AGO=$(( $(date +%s) - LAST_HS ))
+				if [[ ${AGO} -lt 180 ]]; then
+					echo -e "  ${GREEN}[ACTIVE]${NC} ${PEER_KEY:0:12}... — last handshake ${AGO}s ago"
+				else
+					echo -e "  ${ORANGE}[STALE]${NC}  ${PEER_KEY:0:12}... — last handshake ${AGO}s ago"
+				fi
+			else
+				echo -e "  ${RED}[NEVER]${NC}  ${PEER_KEY:0:12}... — never connected"
+			fi
+		done <<<"${HANDSHAKES}"
+	fi
+	echo ""
+
+	# 9. Firewall check — is incoming UDP open?
+	echo -e "${BLUE}[9/9] Firewall / incoming port${NC}"
+	if iptables -L INPUT -n 2>/dev/null | grep -q "udp dpt:${SERVER_PORT}"; then
+		echo -e "  ${GREEN}[OK]${NC} INPUT rule allows UDP ${SERVER_PORT}"
+	elif pgrep firewalld >/dev/null 2>&1; then
+		if firewall-cmd --list-ports 2>/dev/null | grep -q "${SERVER_PORT}/udp"; then
+			echo -e "  ${GREEN}[OK]${NC} firewalld allows UDP ${SERVER_PORT}"
+		else
+			echo -e "  ${ORANGE}[WARN]${NC} UDP ${SERVER_PORT} may not be open in firewalld"
+			ISSUES=$((ISSUES + 1))
+		fi
+	else
+		echo -e "  ${ORANGE}[WARN]${NC} Could not verify incoming port rules"
+	fi
+	echo ""
+
+	# Summary
+	echo -e "${GREEN}========================================${NC}"
+	if [[ ${ISSUES} -eq 0 ]]; then
+		echo -e "${GREEN}  All checks passed! Server looks healthy.${NC}"
+		echo ""
+		echo -e "${BLUE}  If clients from Russia still can't connect:${NC}"
+		echo "  1. Verify the server IP is not blocked by Russian ISP (try different VPS/datacenter)"
+		echo "  2. Ask client to try mobile data vs WiFi (some ISPs block more aggressively)"
+		echo "  3. Try changing the server port (run reinstall with a different port)"
+		echo "  4. Ensure client uses AmneziaVPN app (not standard WireGuard app)"
+	else
+		echo -e "${ORANGE}  Found ${ISSUES} issue(s). Fix them and re-run diagnostics.${NC}"
+	fi
+	echo -e "${GREEN}========================================${NC}"
+	echo ""
+}
+
 function manageMenu() {
 	echo "Welcome to WireGuard-install!"
 	echo ""
@@ -1226,22 +1660,27 @@ function manageMenu() {
 		echo -e "Obfuscation: ${ORANGE}NONE${NC} (standard WireGuard)"
 		;;
 	esac
+	if [[ ${ENABLE_STEALTH} == "y" ]]; then
+		echo -e "Stealth:     ${GREEN}ON${NC} (camouflage web server + anti-probe firewall)"
+	fi
 	echo ""
 	echo "What do you want to do?"
 	echo "   1) Add a new user"
 	echo "   2) List all users"
 	echo "   3) Revoke existing user"
-	echo "   4) Uninstall WireGuard"
-	echo "   5) Exit"
-	until [[ ${MENU_OPTION} =~ ^[1-5]$ ]]; do
-		read -rp "Select an option [1-5]: " MENU_OPTION
+	echo "   4) Run diagnostics"
+	echo "   5) Uninstall WireGuard"
+	echo "   6) Exit"
+	until [[ ${MENU_OPTION} =~ ^[1-6]$ ]]; do
+		read -rp "Select an option [1-6]: " MENU_OPTION
 	done
 	case "${MENU_OPTION}" in
 	1) newClient ;;
 	2) listClients ;;
 	3) revokeClient ;;
-	4) uninstallWg ;;
-	5) exit 0 ;;
+	4) runDiagnostics ;;
+	5) uninstallWg ;;
+	6) exit 0 ;;
 	esac
 }
 
@@ -1277,13 +1716,15 @@ if [[ -e /etc/wireguard/params ]]; then
 	if [[ -z ${ENABLE_MSS_CLAMP} ]]; then ENABLE_MSS_CLAMP="y"; fi
 	ENABLE_NET_OPTIMIZATIONS=$(normalizeYesNo "${ENABLE_NET_OPTIMIZATIONS}")
 	if [[ -z ${ENABLE_NET_OPTIMIZATIONS} ]]; then ENABLE_NET_OPTIMIZATIONS="y"; fi
+	ENABLE_STEALTH=$(normalizeYesNo "${ENABLE_STEALTH}")
+	if [[ -z ${ENABLE_STEALTH} ]]; then ENABLE_STEALTH="n"; fi
 	if [[ -z ${ALLOWED_IPS} ]]; then
 		if [[ ${ENABLE_IPV6} == "y" ]]; then ALLOWED_IPS="0.0.0.0/0,::/0"; else ALLOWED_IPS="0.0.0.0/0"; fi
 	fi
 	if [[ -n ${CLIENT_DNS_1} && -z ${CLIENT_DNS_2} ]]; then CLIENT_DNS_2="${CLIENT_DNS_1}"; fi
 	if [[ ${RESTRICTIVE_NETWORK_MODE} == "y" ]] && [[ ${CLIENT_DNS_1} == "1.1.1.1" && ${CLIENT_DNS_2} == "1.0.0.1" ]]; then
-		CLIENT_DNS_1="9.9.9.9"
-		CLIENT_DNS_2="8.8.8.8"
+		CLIENT_DNS_1="8.8.8.8"
+		CLIENT_DNS_2="1.1.1.1"
 	fi
 
 	setWgVars
